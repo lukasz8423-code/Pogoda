@@ -192,6 +192,7 @@ function wMeta(code,isDay){
   if(code<=48)return{e:"🌫️",t:"Mgła"};
   if(code<=55)return{e:"🌦️",t:"Mżawka"};
   if(code<=65)return{e:"🌧️",t:"Deszcz"};
+  if(code<=57)return{e:"🌦️",t:"Mżawka"};
   if(code<=67)return{e:"🌨️",t:"Marznący deszcz"};
   if(code<=77)return{e:"❄️",t:"Śnieg"};
   if(code<=82)return{e:"🌦️",t:"Przelotny deszcz"};
@@ -205,7 +206,17 @@ function pad(n){return String(n).padStart(2,"0");}
 
 // INDEKS DYSKOMFORTU (Heat Index)
 function discomfortIndex(temp,humidity){
-  const hi=temp-(0.55-0.0055*humidity)*(temp-14.5);
+  // Steadman Heat Index - dokładniejsza formuła
+  let hi;
+  if(temp<27){
+    hi=temp-(0.55-0.0055*humidity)*(temp-14.5);
+  } else {
+    // Pełna formuła Steadmana dla wysokich temperatur
+    hi=-8.78469475556+1.61139411*temp+2.3385248*humidity
+       -0.14611605*temp*humidity-0.012308094*temp*temp
+       -0.016424828*humidity*humidity+0.002211732*temp*temp*humidity
+       +0.00072546*temp*humidity*humidity-0.000003582*temp*temp*humidity*humidity;
+  }
   let label,color,emoji;
   if(hi<16){label="Chłodno";color="rgba(56,189,248,.15)";emoji="🧊";}
   else if(hi<21){label="Komfortowo";color="rgba(52,211,153,.12)";emoji="😊";}
@@ -218,14 +229,21 @@ function discomfortIndex(temp,humidity){
 
 function advice(city,cur){
   const t=Math.round(cur?.temperature_2m??15),c=cur?.weather_code??0;
-  if(c>=95)return{a:`Burza w ${city} (${t}°C)! Zostań w domu, odłącz urządzenia.`,cl:"Zostań w domu",ac:"Obserwuj przez okno"};
-  if(c>=71&&c<=86)return{a:`Śnieg w ${city} przy ${t}°C. Weź łopatę!`,cl:"Kożuch, czapa, ciepłe buty",ac:"Odśnieżanie lub bałwan"};
-  if(c>=51&&c<=82)return{a:`Leje w ${city} (${t}°C). Parasol obowiązkowy.`,cl:"Kalosze i cerata",ac:"Kawa i kanapa"};
-  if(t>=28)return{a:`Spiekota w ${city} – ${t}°C! Pij dużo wody.`,cl:"Krótkie portki, kapelusz",ac:"Basen lub cień"};
-  if(t>=20)return{a:`Piękna pogoda w ${city}, ${t}°C!`,cl:"T-shirt lub lekka koszula",ac:"Rower, spacer, taras"};
-  if(t>=12)return{a:`Przyjemne ${t}°C w ${city}. Weź bluzę.`,cl:"Bluza lub kurtka",ac:"Spacer lub zakupy"};
-  if(t>=3)return{a:`Chłodno w ${city} (${t}°C). Ubierz się ciepło.`,cl:"Kurtka i sweter",ac:"Szybki marsz lub herbata"};
-  return{a:`Mróz w ${city} (${t}°C)! Bez kurtki ani kroku.`,cl:"Najgrubsza kurtka + szal",ac:"Dom i kaloryfer"};
+  const isSnow=(c>=71&&c<=77)||(c>=85&&c<=86);
+  const isRain=(c>=51&&c<=67)||(c>=80&&c<=82);
+  const isStorm=c>=95;
+  const isDrizzle=c>=51&&c<=55;
+  if(isStorm)return{a:`Burza w ${city} (${t}°C)! Zostań w domu i odłącz urządzenia.`,cl:"Zostań w domu",ac:"Obserwuj błyskawice przez okno"};
+  if(isSnow&&t<=5)return{a:`Śnieg w ${city} przy ${t}°C. Weź łopatę!`,cl:"Kożuch, czapa uszatka, ciepłe buty",ac:"Odśnieżanie albo bałwan"};
+  if(isRain&&!isDrizzle)return{a:`Leje w ${city} (${t}°C). Parasol obowiązkowy.`,cl:"Kalosze i cerata",ac:"Kawa i kanapa"};
+  if(isDrizzle)return{a:`Mżawka w ${city} (${t}°C). Weź cienką kurtkę.`,cl:"Lekka kurtka przeciwdeszczowa",ac:"Szybki spacer lub zakupy"};
+  if(t>=30)return{a:`Upał w ${city} – aż ${t}°C! Zostań w cieniu i pij dużo wody.`,cl:"Krótkie portki, koszulka, kapelusz",ac:"Basen lub klimatyzowane miejsce"};
+  if(t>=25)return{a:`Gorąco w ${city}, ${t}°C. Uważaj na słońce.`,cl:"Lekkie ubranie, nakrycie głowy",ac:"Spacer rano lub wieczorem"};
+  if(t>=20)return{a:`Piękna pogoda w ${city}, ${t}°C! Idealna pora żeby wyjść.`,cl:"T-shirt lub lekka koszula",ac:"Rower, spacer, taras"};
+  if(t>=15)return{a:`Przyjemne ${t}°C w ${city}. Możesz wyjść bez kurtki.`,cl:"Bluza lub cienka kurtka",ac:"Spacer lub zakupy"};
+  if(t>=10)return{a:`Chłodnawo w ${city} (${t}°C). Warto wziąć kurtkę.`,cl:"Kurtka i bluza",ac:"Szybki marsz lub rower"};
+  if(t>=3)return{a:`Chłodno w ${city} (${t}°C). Ubierz się ciepło.`,cl:"Kurtka, sweter, długie spodnie",ac:"Herbata i krótki spacer"};
+  return{a:`Mróz w ${city} (${t}°C)! Bez grubej kurtki ani kroku za próg.`,cl:"Najgrubsza kurtka, szal, czapka",ac:"Dom, kaloryfer, herbata z prądem"};
 }
 
 function demoData(){
@@ -239,7 +257,7 @@ function demoData(){
 }
 
 async function apiWeather(lat,lng){
-  const p=new URLSearchParams({latitude:lat,longitude:lng,current:"temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,weather_code,cloud_cover,pressure_msl,wind_speed_10m,wind_gusts_10m,wind_direction_10m,uv_index",hourly:"temperature_2m,weather_code,precipitation_probability,precipitation,cloud_cover,apparent_temperature",daily:"weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,uv_index_max,sunrise,sunset",timezone:"auto",forecast_days:"7"});
+  const p=new URLSearchParams({latitude:lat,longitude:lng,current:"temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,weather_code,cloud_cover,pressure_msl,wind_speed_10m,wind_gusts_10m,wind_direction_10m,uv_index",hourly:"temperature_2m,weather_code,precipitation_probability,precipitation,cloud_cover,apparent_temperature,uv_index",daily:"weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,uv_index_max,sunrise,sunset",timezone:"auto",forecast_days:"7"});
   const r=await fetch("https://api.open-meteo.com/v1/forecast?"+p,{signal:AbortSignal.timeout(9000)});
   if(!r.ok)throw new Error("HTTP "+r.status);
   return r.json();
@@ -307,7 +325,11 @@ const TOWNS=[{name:"LIPNO",x:50,y:50,c:true},{name:"Kikół",x:32,y:28},{name:"S
 function buildRadar(code,precip){
   const storm=code>=95,heavy=code===65||code===82||precip>=2.5,rain=(code>=51&&code<=82)||precip>0||storm||heavy;
   const dotColor=storm?"#FBBF24":rain?"#F87171":"#6366F1";
-  const statusTxt=storm?"⚡ Aktywna burza z wyładowaniami":rain?`🌧️ Opady ${precip.toFixed(1)} mm/h`:"🟢 Brak opadów w zasięgu";
+  const hasPrecip=precip>0.1;
+  const statusTxt=storm?"⚡ Aktywna burza z wyładowaniami":
+    (hasPrecip&&rain)?`🌧️ Opady ${precip.toFixed(1)} mm/h`:
+    (rain&&!hasPrecip)?"🟡 Możliwe opady w okolicy":
+    "🟢 Brak opadów w zasięgu";
   const sec=document.createElement("div");sec.className="rsec";
   const hdr=document.createElement("div");hdr.style.cssText="display:flex;align-items:flex-start;gap:12px;margin-bottom:12px";
   const dot=document.createElement("div");dot.style.cssText=`width:10px;height:10px;border-radius:50%;flex-shrink:0;margin-top:3px;background:${dotColor};box-shadow:0 0 10px ${dotColor};animation:pulse 1.5s ease infinite`;
@@ -331,7 +353,7 @@ function buildRadar(code,precip){
   leg.innerHTML=`<div style="display:flex;gap:10px;flex-wrap:wrap">${[["#34D399","Lekki"],["#FBBF24","Umiarkowany"],["#F87171","Intensywny/Burza"]].map(([c,l])=>`<div style="display:flex;align-items:center;gap:5px;color:#64748B"><div style="width:10px;height:10px;background:${c};border-radius:3px;opacity:.8"></div>${l}</div>`).join("")}</div><span style="color:#6366F1;font-weight:700">🧭 NE +12 km/h</span>`;
   sec.appendChild(leg);
   if(RAF){cancelAnimationFrame(RAF);RAF=null;}
-  const cells=storm?[{x:45,y:48,r:35,tp:"heavy"},{x:50,y:52,r:60,tp:"heavy"},{x:58,y:60,r:85,tp:"mod"}]:heavy?[{x:45,y:48,r:25,tp:"mod"},{x:52,y:54,r:60,tp:"light"}]:rain?[{x:48,y:50,r:40,tp:"light"}]:[];
+  const cells=storm?[{x:45,y:48,r:35,tp:"heavy"},{x:50,y:52,r:60,tp:"heavy"},{x:58,y:60,r:85,tp:"mod"}]:heavy?[{x:45,y:48,r:25,tp:"mod"},{x:52,y:54,r:60,tp:"light"}]:(rain&&precip>0.1)?[{x:48,y:50,r:40,tp:"light"}]:[];
   function draw(){
     const c=document.getElementById("rc");if(!c)return;
     const ctx=c.getContext("2d");const W=c.width,H=c.height;
@@ -526,6 +548,7 @@ function screenSkeleton(){
 }
 
 function screenWeather(){
+  try{
   const {data,city,isDemo,refreshing,lat,lng}=S;
   const {current,hourly,daily}=data;
   const isDay=current.is_day===1;
@@ -539,15 +562,20 @@ function screenWeather(){
   const feels=Math.round(hourly.apparent_temperature?.[ci]??current.apparent_temperature??T);
   const hum=current.relative_humidity_2m,wind=Math.round(current.wind_speed_10m);
   const gusts=Math.round(current.wind_gusts_10m??wind),dir=wdir(current.wind_direction_10m??0);
-  const press=Math.round(current.pressure_msl??0),uv=+(current.uv_index??0).toFixed(1);
+  const press=Math.round(current.pressure_msl??0);
   const cloud=current.cloud_cover??0,pop=hourly.precipitation_probability?.[ci]??0;
+  // UV - preferuj hourly dla aktualnej godziny, fallback na current
+  // Open-Meteo daje clear-sky UV, korygujemy przez zachmurzenie
+  const rawUV=+(hourly.uv_index?.[ci]??current.uv_index??0);
+  const cloudFactor=Math.max(0.05,1-(cloud/100*0.78));
+  const uv=+(rawUV*cloudFactor).toFixed(1);
   const maxT=Math.round(daily.temperature_2m_max[0]),minT=Math.round(daily.temperature_2m_min[0]);
   const precip=+(current.precipitation??0);
   const cloudCeiling=Math.round(7300-(cloud*10)+(T*5));
   const visibility=Math.round(24+((100-cloud)*0.08));
   const sunrise=daily.sunrise?.[0]?new Date(daily.sunrise[0]).toLocaleTimeString("pl-PL",{hour:"2-digit",minute:"2-digit"}):"--:--";
   const sunset=daily.sunset?.[0]?new Date(daily.sunset[0]).toLocaleTimeString("pl-PL",{hour:"2-digit",minute:"2-digit"}):"--:--";
-  const uvMax=+(daily.uv_index_max?.[0]??uv).toFixed(1);
+  const uvMax=+(((daily.uv_index_max?.[0]??rawUV)*(1-(cloud/100*0.65)))).toFixed(1);
   const rainToday=(daily.precipitation_sum?.[0]??0).toFixed(1);
   const disc=discomfortIndex(T,hum);
 
@@ -718,6 +746,14 @@ function screenWeather(){
   });
   sc.appendChild(dl);
   w.appendChild(sc);return w;
+  }catch(err){
+    console.error("screenWeather crash:",err);
+    // Wyczysc zepsuty cache i wróc do intro
+    try{localStorage.removeItem("aura");}catch{}
+    Object.assign(S,{phase:"intro",data:null});
+    setTimeout(render,100);
+    return document.createElement("div");
+  }
 }
 
 function render(){
@@ -729,7 +765,27 @@ function render(){
 }
 
 (function init(){
-  try{const c=localStorage.getItem("aura");if(c){const d=JSON.parse(c);if(d&&d.data&&d.city&&(Date.now()-d.ts)<7200000)Object.assign(S,{phase:"weather",lat:d.lat,lng:d.lng,city:d.city,data:d.data,isDemo:false});}}catch{}
+  // v4 - wymus odswiezenie cache jesli stara wersja
+  try{
+    const ver=localStorage.getItem("aura_ver");
+    if(ver!=="4"){
+      localStorage.removeItem("aura");
+      localStorage.setItem("aura_ver","4");
+    }
+    const c=localStorage.getItem("aura");
+    if(c){
+      const d=JSON.parse(c);
+      // Waliduj dane - sprawdz czy maja wymagane pola
+      if(d&&d.data&&d.city&&d.data.current&&d.data.hourly&&d.data.daily&&(Date.now()-d.ts)<7200000){
+        Object.assign(S,{phase:"weather",lat:d.lat,lng:d.lng,city:d.city,data:d.data,isDemo:false});
+      } else {
+        localStorage.removeItem("aura");
+      }
+    }
+  }catch(e){
+    console.warn("Cache error:",e);
+    try{localStorage.removeItem("aura");}catch{}
+  }
   render();
   if("serviceWorker"in navigator){try{const sw=`self.addEventListener("install",e=>self.skipWaiting());self.addEventListener("activate",e=>clients.claim());self.addEventListener("fetch",e=>{if(e.request.method!=="GET")return;e.respondWith(fetch(e.request).then(r=>{const c=r.clone();caches.open("aura-v3").then(ca=>ca.put(e.request,c));return r;}).catch(()=>caches.match(e.request)));});`;const blob=new Blob([sw],{type:"application/javascript"});navigator.serviceWorker.register(URL.createObjectURL(blob)).catch(()=>{});}catch{}}
 })();
