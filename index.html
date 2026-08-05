@@ -176,6 +176,30 @@ function wdir(d){return["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW"
 function uvLbl(v){return v<3?"Niskie":v<6?"Umiarkowane":v<8?"Wysokie":"B. wysokie";}
 function pad(n){return String(n).padStart(2,"0");}
 
+
+// Temperatura na słońcu i w cieniu
+// Na podstawie promieniowania słonecznego, wiatru i wilgotności
+function calcSunShadeTemp(tempC, radiation, windKmh, humidity){
+  // Temperatura w cieniu = apparent_temperature (juz mamy)
+  // Temperatura na słońcu = temp + efekt promieniowania
+  // Wzór oparty na WBGT (Wet Bulb Globe Temperature) uproszczony
+  
+  const windMs = windKmh / 3.6;
+  
+  // Efekt promieniowania na człowieka (W/m²) -> °C
+  // Przy 800 W/m² ciało pochłania ok 6-8°C więcej
+  const radiationEffect = radiation > 0 
+    ? Math.min(12, (radiation / 1000) * 10 * (1 - humidity/200))
+    : 0;
+  
+  // Korekta wiatru - wiatr chłodzi
+  const windCool = windMs > 0.5 ? Math.min(3, windMs * 0.5) : 0;
+  
+  const sunTemp = Math.round((tempC + radiationEffect - windCool) * 10) / 10;
+  const shadeTemp = Math.round(tempC * 10) / 10;
+  
+  return { sun: sunTemp, shade: shadeTemp };
+}
 // POPRAWNA logika porady — temperatura priorytetem
 function advice(city,cur){
   const t=Math.round(cur?.temperature_2m??15);
@@ -239,7 +263,8 @@ async function apiWeather(lat,lng){
     hourly:[
       "temperature_2m","weather_code","precipitation_probability",
       "precipitation","cloud_cover","apparent_temperature",
-      "uv_index","wind_speed_10m","relative_humidity_2m"
+      "uv_index","wind_speed_10m","relative_humidity_2m",
+      "shortwave_radiation"
     ].join(","),
     daily:[
       "weather_code","temperature_2m_max","temperature_2m_min",
@@ -786,6 +811,12 @@ function screenWeather(){
     const uv=+(rawUV*cloudFactor).toFixed(1);
     const uvMax=+(((daily.uv_index_max?.[0]??rawUV)*(1-(cloud/100*0.65)))).toFixed(1);
 
+    // Temperatura na słońcu i w cieniu
+    const radiation = hourly.shortwave_radiation?.[ci] ?? (rawUV * 80); // W/m²
+    const sunShade = calcSunShadeTemp(T, radiation, wind, hum);
+    const tempSun = sunShade.sun;
+    const tempShade = sunShade.shade;
+
     const cloudCeiling=Math.round(7300-(cloud*10)+(T*5));
     const visibility=Math.round(24+((100-cloud)*0.08));
     const sunrise=daily.sunrise?.[0]?new Date(daily.sunrise[0]).toLocaleTimeString("pl-PL",{hour:"2-digit",minute:"2-digit"}):"--:--";
@@ -828,7 +859,9 @@ function screenWeather(){
     sub.innerHTML=`Odczuwalna <strong style="color:var(--text2)">${feels}°C</strong> &nbsp;·&nbsp; <span style="color:var(--amber)">↑${maxT}°</span> &nbsp;<span style="color:var(--cyan)">↓${minT}°</span>`;
     hero.appendChild(sub);
     const caps=div({style:{display:"flex",flexWrap:"wrap",justifyContent:"center",gap:"6px"}});
-    [`☁️ ${cloud}%`,`🌧️ ${pop}%`,`☀️ UV ${uv} (${uvLbl(uv)})`].forEach(c=>caps.appendChild(sp({cls:"pill"},[c])));
+    const pillItems=[`☁️ ${cloud}%`,`🌧️ ${pop}%`,`☀️ UV ${uv} (${uvLbl(uv)})`];
+    if(radiation>100&&isDay)pillItems.push(`☀️ ${tempSun}°C / 🌳 ${tempShade}°C`);
+    pillItems.forEach(c=>caps.appendChild(sp({cls:"pill"},[c])));
     hero.appendChild(caps);sc.appendChild(hero);
 
     // WIDGET DZIŚ
@@ -894,6 +927,8 @@ function screenWeather(){
       {icon:"🌞",label:"Wschód / Zachód",value:sunrise,sub:`🌇 ${sunset}`},
       {icon:"☁️",label:"Pułap chmur",value:`${cloudCeiling} m`,sub:"Nad terenem"},
       {icon:"👁️",label:"Widoczność",value:`${visibility} km`,sub:visibility>=20?"Bardzo dobra":visibility>=10?"Dobra":"Ograniczona"},
+      {icon:"☀️",label:"Temp. na słońcu",value:`${tempSun}°C`,sub:radiation>50?`Promieniowanie ${Math.round(radiation)} W/m²`:"Brak słońca"},
+      {icon:"🌳",label:"Temp. w cieniu",value:`${tempShade}°C`,sub:"Temperatura rzeczywista"},
     ].forEach((c,i)=>{
       const card=div({cls:"stat-card",style:{animationDelay:`${i*.07}s`}});
       card.appendChild(sp({cls:"stat-icon"},[c.icon]));
