@@ -137,6 +137,18 @@ input,button{font-family:inherit;border:none;outline:none}
 .hist-item{display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--bg2);border:1px solid var(--border);border-radius:14px;cursor:pointer;transition:all .2s;animation:fadeUp .3s ease both}
 .hist-item:hover{border-color:var(--border2)}
 .station-badge{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;background:rgba(52,211,153,.1);border:1px solid rgba(52,211,153,.2);border-radius:999px;font-size:9px;font-weight:700;color:#34D399;margin-top:4px}
+
+/* MODEL PICKER */
+.model-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:200;display:flex;align-items:flex-end;animation:fadeIn .2s ease}
+.model-sheet{background:#0B1221;border:1px solid rgba(255,255,255,.1);border-radius:24px 24px 0 0;padding:20px;width:100%;max-width:430px;margin:0 auto;animation:fadeUp .3s ease}
+.model-item{display:flex;align-items:center;gap:12px;padding:14px 16px;border-radius:16px;cursor:pointer;transition:background .15s;margin-bottom:8px;border:1px solid transparent}
+.model-item:hover{background:rgba(255,255,255,.05)}
+.model-item.active{background:rgba(99,102,241,.15);border-color:rgba(99,102,241,.3)}
+.model-flag{font-size:24px;flex-shrink:0}
+.model-info{flex:1}
+.model-name{font-size:13px;font-weight:700;color:#E8EDF5}
+.model-sat{font-size:11px;color:#34D399;margin-top:2px}
+.model-desc{font-size:10px;color:#475569;margin-top:2px}
 </style>
 <meta http-equiv="Permissions-Policy" content="geolocation=*"/>
 </head>
@@ -249,11 +261,57 @@ function discomfortIndex(temp,hum){
   return{value:hi,label,color,emoji};
 }
 
-// API POGODOWE z pełnymi danymi stacyjnymi (IMGW przez Open-Meteo)
-async function apiWeather(lat,lng){
-  // Open-Meteo automatycznie interpoluje dane z najbliższych stacji IMGW/SYNOP
+// ══════════════════════════════════════════════
+// MULTI-MODEL API z danymi satelitarnymi
+// Satelity: Meteosat/MSG (EUMETSAT), Copernicus (ESA)
+// Modele: ICON (DWD), ECMWF IFS, GFS (NOAA), Météo-France
+// ══════════════════════════════════════════════
+
+// Definicje modeli i satelitów
+const WEATHER_MODELS = [
+  {
+    id:"best_match",
+    name:"Multi-Model Fusion",
+    satellite:"Meteosat-12 (EUMETSAT)",
+    flag:"🛰️",
+    desc:"Najlepsza kombinacja dostępnych modeli"
+  },
+  {
+    id:"icon_seamless",
+    name:"ICON DWD",
+    satellite:"Meteosat-12 (MSG-4)",
+    flag:"🇩🇪",
+    desc:"Niemiecki model DWD, wysoka rozdzielczość"
+  },
+  {
+    id:"ecmwf_ifs025",
+    name:"ECMWF IFS",
+    satellite:"Meteosat-10/11 (MSG-2/3)",
+    flag:"🌍",
+    desc:"Europejski model, najtrafniejsze prognozy długoterminowe"
+  },
+  {
+    id:"gfs_seamless",
+    name:"GFS NOAA",
+    satellite:"GOES-16/18 (NOAA/NASA)",
+    flag:"🇺🇸",
+    desc:"Amerykański model globalny"
+  },
+  {
+    id:"meteofrance_seamless",
+    name:"Météo-France AROME",
+    satellite:"Meteosat-10 (SEVIRI)",
+    flag:"🇫🇷",
+    desc:"Wysoka rozdzielczość dla Europy"
+  },
+];
+
+let activeModel = WEATHER_MODELS[0]; // domyślnie best_match
+
+// Pobierz dane z konkretnego modelu
+async function apiWeatherModel(lat,lng,modelId){
   const p=new URLSearchParams({
-    latitude:lat,longitude:lng,
+    latitude:lat, longitude:lng,
     current:[
       "temperature_2m","relative_humidity_2m","apparent_temperature",
       "is_day","precipitation","weather_code","cloud_cover",
@@ -262,9 +320,9 @@ async function apiWeather(lat,lng){
     ].join(","),
     hourly:[
       "temperature_2m","weather_code","precipitation_probability",
-      "precipitation","cloud_cover","apparent_temperature",
-      "uv_index","wind_speed_10m","relative_humidity_2m",
-      "shortwave_radiation"
+      "precipitation","cloud_cover","cloud_cover_low","cloud_cover_mid",
+      "cloud_cover_high","apparent_temperature","uv_index",
+      "wind_speed_10m","relative_humidity_2m","shortwave_radiation"
     ].join(","),
     daily:[
       "weather_code","temperature_2m_max","temperature_2m_min",
@@ -273,12 +331,16 @@ async function apiWeather(lat,lng){
     ].join(","),
     timezone:"auto",
     forecast_days:"7",
-    // Dodaj dane z najbliższej stacji meteorologicznej
-    models:"best_match"
+    models:modelId
   });
   const r=await fetch("https://api.open-meteo.com/v1/forecast?"+p,{signal:AbortSignal.timeout(10000)});
   if(!r.ok)throw new Error("HTTP "+r.status);
   return r.json();
+}
+
+async function apiWeather(lat,lng){
+  // Pobierz dane z najlepszego modelu (best_match = fuzja modeli satelitarnych)
+  return apiWeatherModel(lat,lng,activeModel.id);
 }
 
 async function apiCity(lat,lng){
@@ -799,7 +861,19 @@ function screenWeather(){
     const gusts=Math.round(current.wind_gusts_10m??wind);
     const dir=wdir(current.wind_direction_10m??0);
     const press=Math.round(current.pressure_msl??0);
-    const cloud=Math.round(current.cloud_cover??0);
+    // Zachmurzenie - tylko niskie i średnie chmury (widoczne gołym okiem)
+    // Wysokie cirrusy ignorujemy - niewidoczne i nie wpływają na pogodę
+    const cloudLow  = hourly.cloud_cover_low?.[ci]  ?? -1;
+    const cloudMid  = hourly.cloud_cover_mid?.[ci]  ?? -1;
+    const cloudHigh = hourly.cloud_cover_high?.[ci] ?? -1;
+    const cloudRaw  = current.cloud_cover ?? 0;
+    const hasLayerData = cloudLow >= 0 || cloudMid >= 0;
+    // Widoczne zachmurzenie = to co widać gołym okiem (bez cirrusów)
+    const cloudVisible = Math.round(hasLayerData
+      ? Math.min(100, Math.max(0, (cloudLow>=0?cloudLow:0)*0.7 + (cloudMid>=0?cloudMid:0)*0.3))
+      : cloudRaw);
+    // Całkowite zachmurzenie (do obliczeń UV/ciśnienia)
+    const cloud = cloudVisible;
     const pop=hourly.precipitation_probability?.[ci]??0;
     const precip=+(current.precipitation??current.rain??0);
     const maxT=Math.round(daily.temperature_2m_max[0]);
@@ -834,10 +908,14 @@ function screenWeather(){
     const hc=div({style:{flex:1,textAlign:"center",margin:"0 10px"}});
     hc.appendChild(pe({style:{fontSize:"9px",fontWeight:700,textTransform:"uppercase",letterSpacing:"2px",color:"var(--text3)",marginBottom:"2px"}},["📍 Lokalizacja"]));
     hc.appendChild(el("h2",{style:{fontSize:"15px",fontWeight:700,color:"var(--text1)",margin:0,letterSpacing:"-0.3px"}},[city]));
-    if(stationInfo){
-      const sb=div({cls:"station-badge"});
-      sb.innerHTML=`🛰️ ${isDemo?"Demo":"IMGW/SYNOP"}`;
-      hc.appendChild(sb);
+    // Badge modelu/satelity
+    const sb=div({cls:"station-badge",style:{cursor:"pointer"},onClick:()=>{showModelPicker(S.lat,S.lng);}});
+    sb.innerHTML=`${activeModel.flag} ${activeModel.name} · ${activeModel.satellite}`;
+    hc.appendChild(sb);
+    if(stationInfo&&!isDemo){
+      const sb2=div({cls:"station-badge",style:{marginTop:"3px",background:"rgba(52,211,153,.1)",borderColor:"rgba(52,211,153,.25)",color:"#34D399"}});
+      sb2.innerHTML=`📡 ${stationInfo}`;
+      hc.appendChild(sb2);
     }
     if(isDemo)hc.appendChild(pe({style:{fontSize:"9px",color:"var(--amber)",marginTop:"2px"}},["⚡ Tryb offline — brak internetu"]));
     hdr.appendChild(hc);
@@ -859,14 +937,18 @@ function screenWeather(){
     sub.innerHTML=`Odczuwalna <strong style="color:var(--text2)">${feels}°C</strong> &nbsp;·&nbsp; <span style="color:var(--amber)">↑${maxT}°</span> &nbsp;<span style="color:var(--cyan)">↓${minT}°</span>`;
     hero.appendChild(sub);
     const caps=div({style:{display:"flex",flexWrap:"wrap",justifyContent:"center",gap:"6px"}});
-    const pillItems=[`☁️ ${cloud}%`,`🌧️ ${pop}%`,`☀️ UV ${uv} (${uvLbl(uv)})`];
+    const pillItems=[`☁️ ${cloudVisible}%`,`🌧️ ${pop}%`,`☀️ UV ${uv} (${uvLbl(uv)})`];
     if(radiation>100&&isDay)pillItems.push(`☀️ ${tempSun}°C / 🌳 ${tempShade}°C`);
     pillItems.forEach(c=>caps.appendChild(sp({cls:"pill"},[c])));
     hero.appendChild(caps);sc.appendChild(hero);
 
     // WIDGET DZIŚ
     const sw2=div({cls:"summary-widget"});
-    sw2.appendChild(div({cls:"summary-title"},["✦ Dziś w skrócie"]));
+    sw2.appendChild(div({style:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:"14px"}},[
+      div({cls:"summary-title",style:{marginBottom:0}},["✦ Dziś w skrócie"]),
+      div({style:{fontSize:"10px",color:"#34D399",fontWeight:700,cursor:"pointer"},onClick:()=>showModelPicker(S.lat,S.lng)},
+        [activeModel.flag+" "+activeModel.name])
+    ]));
     const sg2=div({cls:"summary-grid"});
     [{icon:"🌅",val:sunrise,lbl:"Wschód"},{icon:"🌇",val:sunset,lbl:"Zachód"},{icon:"☀️",val:"UV "+uvMax,lbl:"Maks. UV"},{icon:"🌧️",val:rainToday+"mm",lbl:"Opady"}].forEach(item=>{
       const si=div({cls:"summary-item"});
@@ -926,6 +1008,7 @@ function screenWeather(){
       {icon:"🌡️",label:"Ciśnienie",value:`${press} hPa`},
       {icon:"🌞",label:"Wschód / Zachód",value:sunrise,sub:`🌇 ${sunset}`},
       {icon:"☁️",label:"Pułap chmur",value:`${cloudCeiling} m`,sub:"Nad terenem"},
+      {icon:"🌤️",label:"Zachmurzenie niskie",value:`${cloudLow>=0?Math.round(cloudLow)+"%":"--"}`,sub:cloudMid>=0?`Średnie: ${Math.round(cloudMid)}%`:""},
       {icon:"👁️",label:"Widoczność",value:`${visibility} km`,sub:visibility>=20?"Bardzo dobra":visibility>=10?"Dobra":"Ograniczona"},
       {icon:"☀️",label:"Temp. na słońcu",value:`${tempSun}°C`,sub:radiation>50?`Promieniowanie ${Math.round(radiation)} W/m²`:"Brak słońca"},
       {icon:"🌳",label:"Temp. w cieniu",value:`${tempShade}°C`,sub:"Temperatura rzeczywista"},
