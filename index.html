@@ -861,21 +861,24 @@ function screenWeather(){
     const gusts=Math.round(current.wind_gusts_10m??wind);
     const dir=wdir(current.wind_direction_10m??0);
     const press=Math.round(current.pressure_msl??0);
-    // Zachmurzenie - tylko niskie i średnie chmury (widoczne gołym okiem)
-    // Wysokie cirrusy ignorujemy - niewidoczne i nie wpływają na pogodę
+    const pop=hourly.precipitation_probability?.[ci]??0;
+    const precip=+(current.precipitation??current.rain??0);
+    // Zachmurzenie - warstwy z API
     const cloudLow  = hourly.cloud_cover_low?.[ci]  ?? -1;
     const cloudMid  = hourly.cloud_cover_mid?.[ci]  ?? -1;
     const cloudHigh = hourly.cloud_cover_high?.[ci] ?? -1;
     const cloudRaw  = current.cloud_cover ?? 0;
-    const hasLayerData = cloudLow >= 0 || cloudMid >= 0;
-    // Widoczne zachmurzenie = to co widać gołym okiem (bez cirrusów)
-    const cloudVisible = Math.round(hasLayerData
-      ? Math.min(100, Math.max(0, (cloudLow>=0?cloudLow:0)*0.7 + (cloudMid>=0?cloudMid:0)*0.3))
-      : cloudRaw);
-    // Całkowite zachmurzenie (do obliczeń UV/ciśnienia)
-    const cloud = cloudVisible;
-    const pop=hourly.precipitation_probability?.[ci]??0;
-    const precip=+(current.precipitation??current.rain??0);
+    const hasLayerData = cloudLow >= 0 && (cloudLow + cloudMid + cloudHigh) > 0;
+    // Zachmurzenie widoczne - obliczone po precip (zob. nizej)
+    const cloud = Math.min(100, Math.max(0, Math.round(cloudRaw)));
+
+    // cloudVisible - dopiero tu gdy mamy precip
+    const isRainNow=precip>0||[51,53,55,61,63,65,80,81,82,95,96,99].includes(current.weather_code);
+    const cloudVisible=Math.min(100,Math.max(0,Math.round(
+      isRainNow ? Math.max(cloud,70) :
+      hasLayerData ? Math.max(cloudLow>=0?cloudLow*0.65:0)+(cloudMid>=0?cloudMid*0.25:0)+(cloudHigh>=0?cloudHigh*0.1:0) :
+      cloud
+    )));
     const maxT=Math.round(daily.temperature_2m_max[0]);
     const minT=Math.round(daily.temperature_2m_min[0]);
 
