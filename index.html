@@ -149,6 +149,16 @@ input,button{font-family:inherit;border:none;outline:none}
 .model-name{font-size:13px;font-weight:700;color:#E8EDF5}
 .model-sat{font-size:11px;color:#34D399;margin-top:2px}
 .model-desc{font-size:10px;color:#475569;margin-top:2px}
+
+/* WIARYGODNOSC / CONFIDENCE */
+.confidence-widget{background:var(--bg2);border:1px solid var(--border);border-radius:20px;padding:16px;margin-bottom:22px;animation:fadeUp .5s ease both}
+.confidence-bar-track{width:100%;height:8px;background:rgba(255,255,255,.06);border-radius:999px;overflow:hidden;margin:10px 0}
+.confidence-bar-fill{height:100%;border-radius:999px;transition:width .5s ease}
+.model-compare-row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-top:1px solid var(--border);font-size:12px}
+.model-compare-row:first-child{border-top:none}
+.accuracy-badge{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:999px;font-size:10px;font-weight:700}
+.source-link{display:inline-flex;align-items:center;gap:5px;padding:8px 14px;background:rgba(255,255,255,.04);border:1px solid var(--border);border-radius:12px;font-size:11px;color:var(--text2);text-decoration:none;margin-top:10px;cursor:pointer;transition:all .2s}
+.source-link:hover{background:rgba(255,255,255,.08);color:var(--text1)}
 </style>
 <meta http-equiv="Permissions-Policy" content="geolocation=*"/>
 </head>
@@ -490,6 +500,78 @@ async function findNearestIMGW(lat,lng){
   };
 }
 
+
+// ══════════════════════════════════════════════
+// POROWNANIE WIELU MODELI + PEWNOSC PROGNOZY
+// ══════════════════════════════════════════════
+async function fetchAllModelsCompare(lat,lng){
+  const modelsToCheck = ["icon_seamless","ecmwf_ifs025","gfs_seamless"];
+  const results = await Promise.allSettled(
+    modelsToCheck.map(m=>apiWeatherModel(lat,lng,m))
+  );
+  const valid = results
+    .map((r,i)=>({model:modelsToCheck[i],data:r.status==="fulfilled"?r.value:null}))
+    .filter(r=>r.data);
+  return valid;
+}
+
+function calcConfidence(temps){
+  if(temps.length<2)return{pct:100,spread:0};
+  const min=Math.min(...temps),max=Math.max(...temps);
+  const spread=max-min;
+  // Rozrzut 0-1°C = 95-100%, 1-3°C = 75-95%, 3-6°C = 50-75%, >6°C = <50%
+  let pct;
+  if(spread<=1)pct=95+Math.round((1-spread)*5);
+  else if(spread<=3)pct=75+Math.round((3-spread)/2*20);
+  else if(spread<=6)pct=50+Math.round((6-spread)/3*25);
+  else pct=Math.max(20,50-Math.round((spread-6)*3));
+  return{pct:Math.min(100,Math.max(20,pct)),spread:Math.round(spread*10)/10};
+}
+
+// Zapis historii prognoz do samo-weryfikacji trafności
+function saveForecastHistory(lat,lng,city,predictedTemp,predictedCode){
+  try{
+    let hist=JSON.parse(localStorage.getItem("aura_forecast_hist")||"[]");
+    hist.push({
+      ts:Date.now(),lat,lng,city,
+      predictedTemp,predictedCode,
+      checkAt:Date.now()+3*3600*1000 // sprawdz za 3h
+    });
+    hist=hist.filter(h=>Date.now()-h.ts<7*24*3600*1000); // trzymaj 7 dni
+    localStorage.setItem("aura_forecast_hist",JSON.stringify(hist.slice(-50)));
+  }catch(e){}
+}
+
+function checkForecastAccuracy(actualTemp,actualCode){
+  try{
+    let hist=JSON.parse(localStorage.getItem("aura_forecast_hist")||"[]");
+    const now=Date.now();
+    let updated=false;
+    hist.forEach(h=>{
+      if(!h.verified && now>=h.checkAt && now-h.checkAt<3600*1000){
+        h.actualTemp=actualTemp;
+        h.actualCode=actualCode;
+        h.tempDiff=Math.abs(h.predictedTemp-actualTemp);
+        h.codeMatch=Math.abs(h.predictedCode-actualCode)<10;
+        h.verified=true;
+        updated=true;
+      }
+    });
+    if(updated)localStorage.setItem("aura_forecast_hist",JSON.stringify(hist));
+  }catch(e){}
+}
+
+function getAccuracyStats(){
+  try{
+    const hist=JSON.parse(localStorage.getItem("aura_forecast_hist")||"[]");
+    const verified=hist.filter(h=>h.verified);
+    if(verified.length<3)return null;
+    const avgDiff=verified.reduce((s,h)=>s+h.tempDiff,0)/verified.length;
+    const accuracy=Math.max(0,Math.min(100,Math.round(100-avgDiff*15)));
+    return{accuracy,count:verified.length,avgDiff:Math.round(avgDiff*10)/10};
+  }catch(e){return null;}
+}
+
 function getHistory(){try{return JSON.parse(localStorage.getItem("aura_hist")||"[]");}catch{return[];}}
 function saveHistory(city,lat,lng){
   let h=getHistory().filter(x=>x.n!==city);
@@ -634,7 +716,7 @@ function buildTempChart(hourly,ci){
   scroll.appendChild(inner);wrap.appendChild(scroll);return wrap;
 }
 
-const S={phase:"intro",lat:null,lng:null,city:"",data:null,isDemo:false,loading:false,refreshing:false,stationInfo:null,imgwData:null};
+const S={phase:"intro",lat:null,lng:null,city:"",data:null,isDemo:false,loading:false,refreshing:false,stationInfo:null,imgwData:null,modelCompare:null,confidence:null,lastUpdate:null};
 let searchTimer=null,searchRes=[],gpsErr="",netErr=false,expDay=null;
 
 function el(tag,a,kids){
@@ -724,7 +806,35 @@ async function loadW(lat,lng,name,isRef){
 
   try{localStorage.setItem("aura_v5",JSON.stringify({data,city,lat,lng,ts:Date.now()}));}catch{}
   saveHistory(city,lat,lng);
-  Object.assign(S,{phase:"weather",lat,lng,city,data,isDemo,loading:false,refreshing:false,stationInfo,imgwData});
+  // Sprawdź trafność poprzednich prognoz
+  if(data&&data.current)checkForecastAccuracy(data.current.temperature_2m,data.current.weather_code);
+  // Zapisz aktualną prognozę do przyszłej weryfikacji
+  if(data&&data.hourly){
+    const futureIdx=Math.min(3,data.hourly.time.length-1);
+    if(data.hourly.temperature_2m?.[futureIdx]!=null){
+      saveForecastHistory(lat,lng,city,data.hourly.temperature_2m[futureIdx],data.hourly.weather_code?.[futureIdx]??0);
+    }
+  }
+  // Pobierz porównanie modeli w tle (nie blokuje UI)
+  let modelCompare=null,confidence=null;
+  if(!isDemo){
+    fetchAllModelsCompare(lat,lng).then(results=>{
+      if(results.length>=2){
+        const now=new Date();
+        const pfx2=`${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T${pad(now.getHours())}`;
+        const temps=results.map(r=>{
+          const idx=r.data.hourly.time.findIndex(t=>t.startsWith(pfx2));
+          return idx>=0?r.data.hourly.temperature_2m[idx]:r.data.current.temperature_2m;
+        }).filter(t=>t!=null);
+        const conf=calcConfidence(temps);
+        S.modelCompare=results.map((r,i)=>({name:r.model,temp:Math.round(temps[i]*10)/10}));
+        S.confidence=conf;
+        if(S.phase==="weather")render();
+      }
+    }).catch(()=>{});
+  }
+  S.lastUpdate=Date.now();
+  Object.assign(S,{phase:"weather",lat,lng,city,data,isDemo,loading:false,refreshing:false,stationInfo,imgwData,modelCompare,confidence});
   expDay=null;toastShown=new Set();render();
 }
 
@@ -863,22 +973,10 @@ function screenWeather(){
     const press=Math.round(current.pressure_msl??0);
     const pop=hourly.precipitation_probability?.[ci]??0;
     const precip=+(current.precipitation??current.rain??0);
-    // Zachmurzenie - warstwy z API
-    const cloudLow  = hourly.cloud_cover_low?.[ci]  ?? -1;
-    const cloudMid  = hourly.cloud_cover_mid?.[ci]  ?? -1;
-    const cloudHigh = hourly.cloud_cover_high?.[ci] ?? -1;
-    const cloudRaw  = current.cloud_cover ?? 0;
-    const hasLayerData = cloudLow >= 0 && (cloudLow + cloudMid + cloudHigh) > 0;
-    // Zachmurzenie widoczne - obliczone po precip (zob. nizej)
-    const cloud = Math.min(100, Math.max(0, Math.round(cloudRaw)));
-
-    // cloudVisible - dopiero tu gdy mamy precip
-    const isRainNow=precip>0||[51,53,55,61,63,65,80,81,82,95,96,99].includes(current.weather_code);
-    const cloudVisible=Math.min(100,Math.max(0,Math.round(
-      isRainNow ? Math.max(cloud,70) :
-      hasLayerData ? Math.max(cloudLow>=0?cloudLow*0.65:0)+(cloudMid>=0?cloudMid*0.25:0)+(cloudHigh>=0?cloudHigh*0.1:0) :
-      cloud
-    )));
+    // Zachmurzenie - kod WMO jako głowne źródło prawdy
+    // (to co "widzi" model - koreluje z opisem pogody), warstwy jako pomoc
+    
+    console.log(`[ZACHMURZENIE] kod WMO=${wcode} raw=${cloudRaw}% low=${cloudLow}% -> pokazane=${cloudVisible}%`);
     const maxT=Math.round(daily.temperature_2m_max[0]);
     const minT=Math.round(daily.temperature_2m_min[0]);
 
@@ -994,6 +1092,456 @@ function screenWeather(){
       iw.appendChild(ig);
       sc.appendChild(iw);
     }
+
+    // WIDGET WIARYGODNOSCI - porownanie modeli + trafnosc historyczna
+    const accStats = getAccuracyStats();
+    if(S.confidence || accStats){
+      const rw = div({cls:"confidence-widget"});
+      const rh = div({style:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:"4px"}});
+      rh.appendChild(div({style:{fontSize:"11px",fontWeight:800,textTransform:"uppercase",letterSpacing:"1.5px",color:"var(--text3)"}},["📊 Wiarygodność prognozy"]));
+      rw.appendChild(rh);
+
+      if(S.confidence){
+        const conf = S.confidence;
+        const confColor = conf.pct>=85?"#34D399":conf.pct>=65?"#FBBF24":"#F87171";
+        const confLabel = conf.pct>=85?"Wysoka zgodność modeli":conf.pct>=65?"Umiarkowana zgodność":"Modele się różnią";
+
+        const cRow = div({style:{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginTop:"10px"}});
+        cRow.appendChild(div({style:{fontSize:"22px",fontWeight:800,color:confColor}},[conf.pct+"%"]));
+        cRow.appendChild(div({style:{fontSize:"11px",color:"var(--text3)"}},[confLabel]));
+        rw.appendChild(cRow);
+
+        const bar = div({cls:"confidence-bar-track"});
+        bar.appendChild(div({cls:"confidence-bar-fill",style:{width:conf.pct+"%",background:confColor}}));
+        rw.appendChild(bar);
+
+        if(conf.spread>0){
+          rw.appendChild(div({style:{fontSize:"10px",color:"var(--text3)"}},[`Rozrzut modeli: ±${conf.spread}°C`]));
+        }
+      }
+
+      if(S.modelCompare && S.modelCompare.length>0){
+        const cmpWrap = div({style:{marginTop:"12px"}});
+        const modelNames = {icon_seamless:"🇩🇪 ICON",ecmwf_ifs025:"🌍 ECMWF",gfs_seamless:"🇺🇸 GFS"};
+        S.modelCompare.forEach(m=>{
+          const row = div({cls:"model-compare-row"});
+          row.appendChild(div({style:{color:"var(--text2)"}},[modelNames[m.name]||m.name]));
+          row.appendChild(div({style:{fontWeight:700,color:"var(--text1)"}},[m.temp+"°C"]));
+          cmpWrap.appendChild(row);
+        });
+        rw.appendChild(cmpWrap);
+      }
+
+      if(accStats){
+        const accColor = accStats.accuracy>=85?"#34D399":accStats.accuracy>=65?"#FBBF24":"#F87171";
+        const accRow = div({style:{marginTop:"12px",paddingTop:"12px",borderTop:"1px solid var(--border)",display:"flex",justifyContent:"space-between",alignItems:"center"}});
+        const accLeft = div({});
+        accLeft.appendChild(div({style:{fontSize:"10px",color:"var(--text3)",fontWeight:700,textTransform:"uppercase",letterSpacing:"1px"}},["Trafność historyczna"]));
+        accLeft.appendChild(div({style:{fontSize:"10px",color:"var(--text3)",marginTop:"2px"}},[`${accStats.count} zweryfikowanych prognoz`]));
+        accRow.appendChild(accLeft);
+        const accBadge = sp({cls:"accuracy-badge",style:{background:accColor+"22",color:accColor}},[accStats.accuracy+"%"]);
+        accRow.appendChild(accBadge);
+        rw.appendChild(accRow);
+      }
+
+      // Link do zrodel
+      const srcLink = div({cls:"source-link",onClick:()=>{
+        showRawDataModal();
+      }},["🔗 Sprawdź surowe dane źródłowe"]);
+      rw.appendChild(srcLink);
+
+      sc.appendChild(rw);
+    }
+
+    // Ostatnia aktualizacja
+    if(S.lastUpdate){
+      const upd = div({style:{textAlign:"center",fontSize:"10px",color:"var(--text3)",marginBottom:"18px",fontWeight:600}});
+      const updDate = new Date(S.lastUpdate);
+      upd.textContent = `🕐 Dane z: ${pad(updDate.getHours())}:${pad(updDate.getMinutes())} · Model odświeża się co 1-3h`;
+      sc.appendChild(upd);
+    }
+
+    // INDEKS DYSKOMFORTU
+    const dc=div({cls:"disc-card",style:{background:disc.color,border:`1px solid ${disc.color.replace('.12',',.35').replace('.1',',.3').replace('.08',',.25')}`}});
+    dc.appendChild(div({style:{fontSize:"36px"}},[disc.emoji]));
+    const dcR=div({style:{flex:1}});
+    dcR.appendChild(div({style:{fontSize:"10px",fontWeight:700,textTransform:"uppercase",letterSpacing:"1.5px",color:"var(--text3)",marginBottom:"4px"}},["Indeks dyskomfortu termicznego"]));
+    dcR.appendChild(div({style:{fontSize:"20px",fontWeight:800,color:"var(--text1)"}},[disc.label]));
+    dcR.appendChild(div({style:{fontSize:"12px",color:"var(--text2)",marginTop:"2px"}},["Temp. odczuwalna: "+feels+"°C · wilgotność: "+hum+"%"]));
+    dc.appendChild(dcR);sc.appendChild(dc);
+
+    // STAT CARDS
+    const statg=div({cls:"stat-grid"});
+    [
+      {icon:"💨",label:"Wiatr",value:`${wind} km/h`,sub:gusts>wind?`Porywy ${gusts} km/h · ${dir}`:dir},
+      {icon:"💧",label:"Wilgotność",value:`${hum}%`,sub:"Względna"},
+      {icon:"🌡️",label:"Ciśnienie",value:`${press} hPa`},
+      {icon:"🌞",label:"Wschód / Zachód",value:sunrise,sub:`🌇 ${sunset}`},
+      {icon:"☁️",label:"Pułap chmur",value:`${cloudCeiling} m`,sub:"Nad terenem"},
+      {icon:"🌤️",label:"Zachmurzenie niskie",value:`${cloudLow>=0?Math.round(cloudLow)+"%":"--"}`,sub:cloudMid>=0?`Średnie: ${Math.round(cloudMid)}%`:""},
+      {icon:"👁️",label:"Widoczność",value:`${visibility} km`,sub:visibility>=20?"Bardzo dobra":visibility>=10?"Dobra":"Ograniczona"},
+      {icon:"☀️",label:"Temp. na słońcu",value:`${tempSun}°C`,sub:radiation>50?`Promieniowanie ${Math.round(radiation)} W/m²`:"Brak słońca"},
+      {icon:"🌳",label:"Temp. w cieniu",value:`${tempShade}°C`,sub:"Temperatura rzeczywista"},
+    ].forEach((c,i)=>{
+      const card=div({cls:"stat-card",style:{animationDelay:`${i*.07}s`}});
+      card.appendChild(sp({cls:"stat-icon"},[c.icon]));
+      card.appendChild(div({cls:"stat-label"},[c.label]));
+      card.appendChild(div({cls:"stat-value"},[c.value]));
+      if(c.sub)card.appendChild(div({cls:"stat-sub"},[c.sub]));
+      statg.appendChild(card);
+    });sc.appendChild(statg);
+
+    // WYKRES
+    sc.appendChild(buildTempChart(hourly,ci));
+
+    // GODZINY
+    sc.appendChild(pe({cls:"stitle"},["🕐 Najbliższe godziny"]));
+    const hr=div({cls:"hrow"});
+    for(let i=0;i<24;i++){
+      const idx=ci+i;if(idx>=hourly.time.length)break;
+      const hm=wMeta(hourly.weather_code[idx]);
+      const hc2=div({cls:"hcard"+(i===0?" now":""),style:{animationDelay:`${i*.04}s`}});
+      hc2.appendChild(div({cls:"hcard-time"},[i===0?"Teraz":new Date(hourly.time[idx]).toLocaleTimeString("pl-PL",{hour:"2-digit",minute:"2-digit"})]));
+      hc2.appendChild(div({cls:"hcard-emoji"},[hm.e]));
+      hc2.appendChild(div({cls:"hcard-temp"},[Math.round(hourly.temperature_2m[idx])+"°"]));
+      hc2.appendChild(div({cls:"hcard-pop"},["💧"+(hourly.precipitation_probability?.[idx]??0)+"%"]));
+      hc2.appendChild(div({cls:"hcard-cloud"},["☁️"+(hourly.cloud_cover?.[idx]??0)+"%"]));
+      const prec2=+(hourly.precipitation?.[idx]??0);
+      if(prec2>0)hc2.appendChild(div({cls:"hcard-rain"},["🌧️"+prec2.toFixed(1)+"mm"]));
+      hr.appendChild(hc2);
+    }sc.appendChild(hr);
+
+    // AI
+    const ai=div({cls:"ai-card"});
+    ai.appendChild(div({cls:"ai-badge"},["✨ Asystent pogodowy"]));
+    ai.appendChild(pe({cls:"ai-text"},['"'+adv.a+'"']));
+    [{e:"👕",l:"Ubiór",v:adv.cl},{e:"🏃",l:"Aktywność",v:adv.ac}].forEach(s=>{
+      const row=div({cls:"ai-row"});
+      row.appendChild(sp({cls:"ai-row-icon"},[s.e]));
+      const txt=div({});
+      txt.appendChild(div({cls:"ai-row-label"},[s.l]));
+      txt.appendChild(div({cls:"ai-row-val"},[s.v]));
+      row.appendChild(txt);ai.appendChild(row);
+    });sc.appendChild(ai);
+
+    // RADAR
+    sc.appendChild(buildRadar(current.weather_code,precip));
+
+    // 7 DNI
+    sc.appendChild(pe({cls:"stitle"},["📅 Prognoza 7-dniowa"]));
+    const dl=div({style:{display:"flex",flexDirection:"column",gap:"8px"}});
+    daily.time.slice(0,7).forEach((day,i)=>{
+      const dm=wMeta(daily.weather_code[i]);
+      const label=i===0?"Dziś":i===1?"Jutro":new Date(day).toLocaleDateString("pl-PL",{weekday:"long"}).replace(/^\w/,c=>c.toUpperCase());
+      const open=expDay===i;
+      const dw=div({});
+      const db=bt({cls:"drow"+(open?" open":""),style:{animationDelay:`${i*.06}s`},onClick:()=>{expDay=open?null:i;render();}});
+      db.appendChild(sp({style:{fontSize:"14px",fontWeight:800,color:open?"#A5B4FC":"#E2E8F0",flex:"0 0 80px"}},[label]));
+      db.appendChild(sp({style:{fontSize:"26px",lineHeight:1}},[dm.e]));
+      db.appendChild(div({style:{display:"flex",flexDirection:"column",alignItems:"center",flex:1,gap:"3px"}},[
+        sp({style:{fontSize:"12px",fontWeight:800,color:"#38BDF8"}},["💧"+daily.precipitation_probability_max[i]+"%"]),
+        sp({style:{fontSize:"11px",color:"#94A3B8",fontWeight:600}},["☁️"+(daily.precipitation_sum[i]>0?daily.precipitation_sum[i].toFixed(1)+"mm":"sucho")]),
+      ]));
+      const temps=div({style:{textAlign:"right"}});
+      temps.appendChild(div({style:{fontSize:"16px",fontWeight:800,color:"#F1F5F9"}},[Math.round(daily.temperature_2m_max[i])+"°"]));
+      temps.appendChild(div({style:{fontSize:"12px",color:"#94A3B8",fontWeight:600}},[Math.round(daily.temperature_2m_min[i])+"°"]));
+      db.appendChild(temps);
+      db.appendChild(sp({style:{fontSize:"10px",color:open?"var(--blue2)":"var(--text3)",display:"inline-block",transition:"transform .3s",transform:open?"rotate(180deg)":"none"}},["▼"]));
+      dw.appendChild(db);
+      if(open){
+        const det=div({style:{animation:"fadeUp .3s ease",paddingTop:"8px"}});
+        const dc2=div({style:{display:"flex",gap:"8px",overflowX:"auto",paddingBottom:"8px"}});
+        [{l:"Max",v:Math.round(daily.temperature_2m_max[i])+"°"},{l:"Min",v:Math.round(daily.temperature_2m_min[i])+"°"},{l:"Opady",v:(daily.precipitation_sum[i]||0).toFixed(1)+" mm"},{l:"UV max",v:(daily.uv_index_max?.[i]||0).toFixed(1)},
+          ...(daily.sunrise?.[i]?[{l:"Wschód",v:new Date(daily.sunrise[i]).toLocaleTimeString("pl-PL",{hour:"2-digit",minute:"2-digit"})}]:[]),
+          ...(daily.sunset?.[i]?[{l:"Zachód",v:new Date(daily.sunset[i]).toLocaleTimeString("pl-PL",{hour:"2-digit",minute:"2-digit"})}]:[]),
+        ].forEach((s,j)=>{
+          const mc=div({cls:"mcard",style:{animation:`scaleIn .3s ease ${j*.05}s both`}});
+          mc.appendChild(div({style:{fontSize:"10px",color:"#64748B",fontWeight:700,textTransform:"uppercase",letterSpacing:"1px",marginBottom:"5px"}},[s.l]));
+          mc.appendChild(div({style:{fontSize:"15px",fontWeight:800,color:"#F1F5F9"}},[s.v]));
+          dc2.appendChild(mc);
+        });
+        det.appendChild(dc2);
+        // Godziny dnia
+        const dateStr=day.slice(0,10);
+        const dayH=[];
+        hourly.time.forEach((t,idx)=>{
+          if(t.startsWith(dateStr))dayH.push({lb:new Date(t).toLocaleTimeString("pl-PL",{hour:"2-digit",minute:"2-digit"}),e:wMeta(hourly.weather_code[idx]).e,t:Math.round(hourly.temperature_2m[idx]),pop:hourly.precipitation_probability?.[idx]??0,cloud:hourly.cloud_cover?.[idx]??0,precip:(+(hourly.precipitation?.[idx]??0)).toFixed(1)});
+        });
+        if(dayH.length>0){
+          det.appendChild(pe({style:{fontSize:"10px",fontWeight:800,textTransform:"uppercase",letterSpacing:"2px",color:"#94A3B8",margin:"8px 0 10px 2px"}},["🕐 Godziny"]));
+          const hRow=div({cls:"hrow"});
+          dayH.forEach((hh,j)=>{
+            const hc3=div({cls:"hcard",style:{animation:`scaleIn .25s ease ${j*.03}s both`}});
+            hc3.appendChild(div({cls:"hcard-time"},[hh.lb]));
+            hc3.appendChild(div({cls:"hcard-emoji"},[hh.e]));
+            hc3.appendChild(div({cls:"hcard-temp"},[hh.t+"°"]));
+            hc3.appendChild(div({cls:"hcard-pop"},["💧"+hh.pop+"%"]));
+            hc3.appendChild(div({cls:"hcard-cloud"},["☁️"+hh.cloud+"%"]));
+            if(parseFloat(hh.precip)>0)hc3.appendChild(div({cls:"hcard-rain"},["🌧️"+hh.precip+"mm"]));
+            hRow.appendChild(hc3);
+          });
+          det.appendChild(hRow);
+        }
+        dw.appendChild(det);
+      }
+      dl.appendChild(dw);
+    });
+    sc.appendChild(dl);
+    w.appendChild(sc);return w;
+
+  }catch(err){
+    console.error("screenWeather crash:",err);
+    try{localStorage.removeItem("aura_v5");}catch{}
+    Object.assign(S,{phase:"intro",data:null});
+    setTimeout(render,100);
+    return div({});
+  }
+}
+
+function render(){
+  if(RAF&&S.phase!=="weather"){cancelAnimationFrame(RAF);RAF=null;}
+  const app=document.getElementById("app");app.innerHTML="";
+  if(S.phase==="intro")app.appendChild(screenIntro());
+  else if(S.phase==="loading")app.appendChild(screenSkeleton());
+  else if(S.phase==="weather"&&S.data)app.appendChild(screenWeather());
+}
+
+(function init(){
+  // Wyczyść stary cache z poprzednich wersji
+  try{
+    ["aura","aura_v2","aura_v3","aura_v4"].forEach(k=>{
+      try{localStorage.removeItem(k);}catch{}
+    });
+    const c=localStorage.getItem("aura_v5");
+    if(c){
+      const d=JSON.parse(c);
+      if(d&&d.data&&d.city&&d.data.current&&d.data.hourly&&d.data.daily&&(Date.now()-d.ts)<7200000){
+        Object.assign(S,{phase:"weather",lat:d.lat,lng:d.lng,city:d.city,data:d.data,isDemo:false,stationInfo:`Open-Meteo (IMGW/SYNOP) · ${(+d.lat).toFixed(3)}°N, ${(+d.lng).toFixed(3)}°E`});
+      }
+    }
+  }catch(e){console.warn("Cache err:",e);}
+  render();
+  if("serviceWorker"in navigator){
+    try{
+      const sw=`self.addEventListener("install",e=>self.skipWaiting());self.addEventListener("activate",e=>clients.claim());self.addEventListener("fetch",e=>{if(e.request.method!=="GET")return;e.respondWith(fetch(e.request).then(r=>{const c=r.clone();caches.open("aura-v5").then(ca=>ca.put(e.request,c));return r;}).catch(()=>caches.match(e.request)));});`;
+      const blob=new Blob([sw],{type:"application/javascript"});
+      navigator.serviceWorker.register(URL.createObjectURL(blob)).catch(()=>{});
+    }catch{}
+  }
+})();
+</script>
+</body>
+</html>// Zachmurzenie widoczne - warstwy niskie/srednie jako podstawa,
+    // bo to one sa widoczne golym okiem. Wysokie cirrusy ledwo widac.
+    const cloudLow  = hourly.cloud_cover_low?.[ci]  ?? -1;
+    const cloudMid  = hourly.cloud_cover_mid?.[ci]  ?? -1;
+    const cloudHigh = hourly.cloud_cover_high?.[ci] ?? -1;
+    const cloudRaw  = current.cloud_cover ?? 0;
+    const wcode = current.weather_code;
+    const hasLayerData = cloudLow>=0 && cloudMid>=0;
+
+    let cloudVisible;
+    if(hasLayerData){
+      // Mamy dane warstwowe - uzyj ich (najbardziej wiarygodne)
+      const cL = Math.max(0,cloudLow);
+      const cM = Math.max(0,cloudMid);
+      const cH = cloudHigh>=0 ? Math.max(0,cloudHigh) : 0;
+      cloudVisible = cL*0.75 + cM*0.20 + cH*0.05;
+    } else {
+      // Brak warstw - fallback na raw cloud_cover
+      cloudVisible = cloudRaw;
+    }
+    // Przy realnych opadach - minimum 65% (fizycznie musi byc pochmurno)
+    const hasRealPrecip = precip > 0.1;
+    if(hasRealPrecip) cloudVisible = Math.max(cloudVisible, 65);
+
+    cloudVisible = Math.min(100,Math.max(0,Math.round(cloudVisible)));
+    const cloud = cloudVisible;
+    console.log(`[ZACHMURZENIE] kod WMO=${wcode} raw=${cloudRaw}% low=${cloudLow}% -> pokazane=${cloudVisible}%`);
+    const maxT=Math.round(daily.temperature_2m_max[0]);
+    const minT=Math.round(daily.temperature_2m_min[0]);
+
+    // UV z korekcją przez zachmurzenie
+    const rawUV=+(hourly.uv_index?.[ci]??current.uv_index??0);
+    const cloudFactor=Math.max(0.05,1-(cloud/100*0.78));
+    const uv=+(rawUV*cloudFactor).toFixed(1);
+    const uvMax=+(((daily.uv_index_max?.[0]??rawUV)*(1-(cloud/100*0.65)))).toFixed(1);
+
+    // Temperatura na słońcu i w cieniu
+    const radiation = hourly.shortwave_radiation?.[ci] ?? (rawUV * 80); // W/m²
+    const sunShade = calcSunShadeTemp(T, radiation, wind, hum);
+    const tempSun = sunShade.sun;
+    const tempShade = sunShade.shade;
+
+    const cloudCeiling=Math.round(7300-(cloud*10)+(T*5));
+    const visibility=Math.round(24+((100-cloud)*0.08));
+    const sunrise=daily.sunrise?.[0]?new Date(daily.sunrise[0]).toLocaleTimeString("pl-PL",{hour:"2-digit",minute:"2-digit"}):"--:--";
+    const sunset=daily.sunset?.[0]?new Date(daily.sunset[0]).toLocaleTimeString("pl-PL",{hour:"2-digit",minute:"2-digit"}):"--:--";
+    const rainToday=(daily.precipitation_sum?.[0]??0).toFixed(1);
+    const disc=discomfortIndex(T,hum);
+
+    setTimeout(()=>checkAlerts(current,hourly,ci),600);
+
+    const w=div({style:{display:"flex",flexDirection:"column",height:"100%",overflow:"hidden",position:"relative",zIndex:2}});
+
+    // HEADER
+    const hdr=div({cls:"hdr"});
+    hdr.appendChild(bt({cls:"btn-ghost",onClick:()=>{if(RAF){cancelAnimationFrame(RAF);RAF=null;}const a=document.getElementById("amb");if(a)a.innerHTML="";Object.assign(S,{phase:"intro"});expDay=null;render();}},["🔍"]));
+    const hc=div({style:{flex:1,textAlign:"center",margin:"0 10px"}});
+    hc.appendChild(pe({style:{fontSize:"9px",fontWeight:700,textTransform:"uppercase",letterSpacing:"2px",color:"var(--text3)",marginBottom:"2px"}},["📍 Lokalizacja"]));
+    hc.appendChild(el("h2",{style:{fontSize:"15px",fontWeight:700,color:"var(--text1)",margin:0,letterSpacing:"-0.3px"}},[city]));
+    // Badge modelu/satelity
+    const sb=div({cls:"station-badge",style:{cursor:"pointer"},onClick:()=>{showModelPicker(S.lat,S.lng);}});
+    sb.innerHTML=`${activeModel.flag} ${activeModel.name} · ${activeModel.satellite}`;
+    hc.appendChild(sb);
+    if(stationInfo&&!isDemo){
+      const sb2=div({cls:"station-badge",style:{marginTop:"3px",background:"rgba(52,211,153,.1)",borderColor:"rgba(52,211,153,.25)",color:"#34D399"}});
+      sb2.innerHTML=`📡 ${stationInfo}`;
+      hc.appendChild(sb2);
+    }
+    if(isDemo)hc.appendChild(pe({style:{fontSize:"9px",color:"var(--amber)",marginTop:"2px"}},["⚡ Tryb offline — brak internetu"]));
+    hdr.appendChild(hc);
+    const rb=bt({cls:"btn-ghost",disabled:refreshing,style:{opacity:refreshing?.5:1},onClick:()=>{if(S.lat)loadW(S.lat,S.lng,S.city,true);}});
+    rb.innerHTML=refreshing?"<span class='spinner'></span>":"🔄";hdr.appendChild(rb);w.appendChild(hdr);
+
+    const sc=div({cls:"scroller"});
+
+    // HERO
+    const hero=div({cls:"hero"});
+    hero.appendChild(div({style:{position:"absolute",top:0,left:0,right:0,height:"100%",background:"radial-gradient(ellipse at 50% 0%,rgba(99,102,241,.07),transparent 60%)",pointerEvents:"none"}}));
+    hero.appendChild(sp({cls:"hero-emoji"},[meta.e]));
+    const tr=div({style:{display:"flex",alignItems:"flex-start",justifyContent:"center",marginTop:"8px"}});
+    tr.appendChild(sp({cls:"hero-temp"},[String(T)]));
+    tr.appendChild(sp({cls:"hero-unit"},["°C"]));
+    hero.appendChild(tr);
+    hero.appendChild(pe({cls:"hero-desc"},[meta.t]));
+    const sub=pe({cls:"hero-sub"});
+    sub.innerHTML=`Odczuwalna <strong style="color:var(--text2)">${feels}°C</strong> &nbsp;·&nbsp; <span style="color:var(--amber)">↑${maxT}°</span> &nbsp;<span style="color:var(--cyan)">↓${minT}°</span>`;
+    hero.appendChild(sub);
+    const caps=div({style:{display:"flex",flexWrap:"wrap",justifyContent:"center",gap:"6px"}});
+    const pillItems=[`☁️ ${cloudVisible}%`,`🌧️ ${pop}%`,`☀️ UV ${uv} (${uvLbl(uv)})`];
+    if(radiation>100&&isDay)pillItems.push(`☀️ ${tempSun}°C / 🌳 ${tempShade}°C`);
+    pillItems.forEach(c=>caps.appendChild(sp({cls:"pill"},[c])));
+    hero.appendChild(caps);sc.appendChild(hero);
+
+    // WIDGET DZIŚ
+    const sw2=div({cls:"summary-widget"});
+    sw2.appendChild(div({style:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:"14px"}},[
+      div({cls:"summary-title",style:{marginBottom:0}},["✦ Dziś w skrócie"]),
+      div({style:{fontSize:"10px",color:"#34D399",fontWeight:700,cursor:"pointer"},onClick:()=>showModelPicker(S.lat,S.lng)},
+        [activeModel.flag+" "+activeModel.name])
+    ]));
+    const sg2=div({cls:"summary-grid"});
+    [{icon:"🌅",val:sunrise,lbl:"Wschód"},{icon:"🌇",val:sunset,lbl:"Zachód"},{icon:"☀️",val:"UV "+uvMax,lbl:"Maks. UV"},{icon:"🌧️",val:rainToday+"mm",lbl:"Opady"}].forEach(item=>{
+      const si=div({cls:"summary-item"});
+      si.appendChild(div({cls:"summary-icon"},[item.icon]));
+      si.appendChild(div({cls:"summary-val"},[item.val]));
+      si.appendChild(div({cls:"summary-lbl"},[item.lbl]));
+      sg2.appendChild(si);
+    });
+    sw2.appendChild(sg2);sc.appendChild(sw2);
+
+
+    // WIDGET LOKALNEJ STACJI IMGW
+    if(S.imgwData){
+      const iw=div({style:{background:"rgba(52,211,153,.06)",border:"1px solid rgba(52,211,153,.2)",borderRadius:"22px",padding:"16px",marginBottom:"22px",animation:"fadeUp .5s ease both"}});
+      // Naglowek
+      const ih=div({style:{display:"flex",alignItems:"center",gap:"10px",marginBottom:"14px"}});
+      const idot=div({style:{width:"8px",height:"8px",borderRadius:"50%",background:"#34D399",boxShadow:"0 0 8px #34D399",animation:"pulse 1.5s ease infinite",flexShrink:0}});
+      ih.appendChild(idot);
+      const itxt=div({style:{flex:1}});
+      itxt.appendChild(div({style:{fontSize:"11px",fontWeight:800,color:"#34D399",textTransform:"uppercase",letterSpacing:"1.5px"}},["🛰️ Stacja IMGW-PIB · Dane na żywo"]));
+      itxt.appendChild(div({style:{fontSize:"12px",color:"var(--text2)",marginTop:"3px",fontWeight:600}},[`${S.imgwData.stacja||S.imgwData.name} · ${S.imgwData.dist} km od Ciebie`]));
+      ih.appendChild(itxt);
+      iw.appendChild(ih);
+      // Dane ze stacji
+      const ig=div({style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"8px"}});
+      const stItems=[
+        {icon:"🌡️",label:"Temperatura",val:`${S.imgwData.temperatura}°C`,ok:!isNaN(parseFloat(S.imgwData.temperatura))},
+        {icon:"💧",label:"Wilgotność",val:`${S.imgwData.wilgotnosc_wzgledna}%`,ok:!isNaN(parseFloat(S.imgwData.wilgotnosc_wzgledna))},
+        {icon:"💨",label:"Wiatr",val:`${Math.round(parseFloat(S.imgwData.predkosc_wiatru||0)*3.6)} km/h`,ok:true},
+        {icon:"🌡️",label:"Ciśnienie",val:`${S.imgwData.cisnienie} hPa`,ok:parseFloat(S.imgwData.cisnienie)>0},
+        {icon:"🌧️",label:"Opady",val:`${S.imgwData.suma_opadu||0} mm`,ok:true},
+        {icon:"🧭",label:"Kierunek wiatru",val:`${S.imgwData.kierunek_wiatru||"--"}°`,ok:true},
+      ].filter(x=>x.ok);
+      stItems.forEach(item=>{
+        const ic=div({style:{background:"rgba(0,0,0,.2)",border:"1px solid rgba(52,211,153,.1)",borderRadius:"14px",padding:"10px 12px"}});
+        ic.appendChild(div({style:{fontSize:"10px",color:"var(--text3)",fontWeight:700,textTransform:"uppercase",letterSpacing:"1px",marginBottom:"4px"}},[item.icon+" "+item.label]));
+        ic.appendChild(div({style:{fontSize:"16px",fontWeight:800,color:"#34D399"}},[item.val]));
+        ig.appendChild(ic);
+      });
+      iw.appendChild(ig);
+      sc.appendChild(iw);
+    }
+
+    // WIDGET WIARYGODNOSCI - porownanie modeli + trafnosc historyczna
+    const accStats = getAccuracyStats();
+    if(S.confidence || accStats){
+      const rw = div({cls:"confidence-widget"});
+      const rh = div({style:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:"4px"}});
+      rh.appendChild(div({style:{fontSize:"11px",fontWeight:800,textTransform:"uppercase",letterSpacing:"1.5px",color:"var(--text3)"}},["📊 Wiarygodność prognozy"]));
+      rw.appendChild(rh);
+
+      if(S.confidence){
+        const conf = S.confidence;
+        const confColor = conf.pct>=85?"#34D399":conf.pct>=65?"#FBBF24":"#F87171";
+        const confLabel = conf.pct>=85?"Wysoka zgodność modeli":conf.pct>=65?"Umiarkowana zgodność":"Modele się różnią";
+
+        const cRow = div({style:{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginTop:"10px"}});
+        cRow.appendChild(div({style:{fontSize:"22px",fontWeight:800,color:confColor}},[conf.pct+"%"]));
+        cRow.appendChild(div({style:{fontSize:"11px",color:"var(--text3)"}},[confLabel]));
+        rw.appendChild(cRow);
+
+        const bar = div({cls:"confidence-bar-track"});
+        bar.appendChild(div({cls:"confidence-bar-fill",style:{width:conf.pct+"%",background:confColor}}));
+        rw.appendChild(bar);
+
+        if(conf.spread>0){
+          rw.appendChild(div({style:{fontSize:"10px",color:"var(--text3)"}},[`Rozrzut modeli: ±${conf.spread}°C`]));
+        }
+      }
+
+      if(S.modelCompare && S.modelCompare.length>0){
+        const cmpWrap = div({style:{marginTop:"12px"}});
+        const modelNames = {icon_seamless:"🇩🇪 ICON",ecmwf_ifs025:"🌍 ECMWF",gfs_seamless:"🇺🇸 GFS"};
+        S.modelCompare.forEach(m=>{
+          const row = div({cls:"model-compare-row"});
+          row.appendChild(div({style:{color:"var(--text2)"}},[modelNames[m.name]||m.name]));
+          row.appendChild(div({style:{fontWeight:700,color:"var(--text1)"}},[m.temp+"°C"]));
+          cmpWrap.appendChild(row);
+        });
+        rw.appendChild(cmpWrap);
+      }
+
+      if(accStats){
+        const accColor = accStats.accuracy>=85?"#34D399":accStats.accuracy>=65?"#FBBF24":"#F87171";
+        const accRow = div({style:{marginTop:"12px",paddingTop:"12px",borderTop:"1px solid var(--border)",display:"flex",justifyContent:"space-between",alignItems:"center"}});
+        const accLeft = div({});
+        accLeft.appendChild(div({style:{fontSize:"10px",color:"var(--text3)",fontWeight:700,textTransform:"uppercase",letterSpacing:"1px"}},["Trafność historyczna"]));
+        accLeft.appendChild(div({style:{fontSize:"10px",color:"var(--text3)",marginTop:"2px"}},[`${accStats.count} zweryfikowanych prognoz`]));
+        accRow.appendChild(accLeft);
+        const accBadge = sp({cls:"accuracy-badge",style:{background:accColor+"22",color:accColor}},[accStats.accuracy+"%"]);
+        accRow.appendChild(accBadge);
+        rw.appendChild(accRow);
+      }
+
+      // Link do zrodel
+      const srcLink = div({cls:"source-link",onClick:()=>{
+        showRawDataModal();
+      }},["🔗 Sprawdź surowe dane źródłowe"]);
+      rw.appendChild(srcLink);
+
+      sc.appendChild(rw);
+    }
+
+    // Ostatnia aktualizacja
+    if(S.lastUpdate){
+      const upd = div({style:{textAlign:"center",fontSize:"10px",color:"var(--text3)",marginBottom:"18px",fontWeight:600}});
+      const updDate = new Date(S.lastUpdate);
+      upd.textContent = `🕐 Dane z: ${pad(updDate.getHours())}:${pad(updDate.getMinutes())} · Model odświeża się co 1-3h`;
+      sc.appendChild(upd);
+    }
+
     // INDEKS DYSKOMFORTU
     const dc=div({cls:"disc-card",style:{background:disc.color,border:`1px solid ${disc.color.replace('.12',',.35').replace('.1',',.3').replace('.08',',.25')}`}});
     dc.appendChild(div({style:{fontSize:"36px"}},[disc.emoji]));
